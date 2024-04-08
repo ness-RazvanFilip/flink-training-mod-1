@@ -21,6 +21,9 @@ package org.apache.flink.training.exercises.longrides;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -34,6 +37,8 @@ import org.apache.flink.training.exercises.common.utils.MissingSolutionException
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 /**
  * The "Long Ride Alerts" exercise.
@@ -98,17 +103,67 @@ public class LongRidesExercise {
     @VisibleForTesting
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
 
+        private transient ValueState<Long> rideStartState;
+        private transient ValueState<Long> endTimerState;
+        private transient ValueState<Long> endBeforeStartState;
+
         @Override
         public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+            ValueStateDescriptor<Long> rideStartStateDescriptor = new ValueStateDescriptor<>("rideStart", Types.LONG);
+            rideStartState = getRuntimeContext().getState(rideStartStateDescriptor);
+
+            ValueStateDescriptor<Long> timerStateDescriptor = new ValueStateDescriptor<>("endTimer", Types.LONG);
+            endTimerState = getRuntimeContext().getState(timerStateDescriptor);
+
+            ValueStateDescriptor<Long> endBeforeStartStateDescriptor = new ValueStateDescriptor<>("rideStart", Types.LONG);
+            endBeforeStartState = getRuntimeContext().getState(endBeforeStartStateDescriptor);
         }
 
         @Override
         public void processElement(TaxiRide ride, Context context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            if (ride.isStart) {
+                Long endBeforeStart = endBeforeStartState.value();
+                if (endBeforeStart == null) {
+                    rideStartState.update(ride.eventTime.toEpochMilli());
+                    long rideEndTimeout = ride.eventTime.plus(2, ChronoUnit.HOURS).toEpochMilli();
+                    context.timerService().registerEventTimeTimer(rideEndTimeout);
+                    endTimerState.update(rideEndTimeout);
+                } else {
+                    if (rideLongerThanTwoHours(ride.eventTime.toEpochMilli(), Instant.ofEpochMilli(endBeforeStart))) {
+                        out.collect(ride.rideId);
+                    }
+                    endBeforeStartState.clear();
+                }
+            } else {
+                Long rideStart = rideStartState.value();
+                if (rideStart == null) {
+                    endBeforeStartState.update(ride.eventTime.toEpochMilli());
+                } else {
+                    if (rideLongerThanTwoHours(rideStart, ride.eventTime)) {
+                        out.collect(ride.rideId);
+                    }
+                    rideStartState.clear();
+                    Long rideEndTimeout = endTimerState.value();
+                    if (rideEndTimeout != null) {
+                        context.timerService().deleteEventTimeTimer(rideEndTimeout);
+                        endTimerState.clear();
+                    }
+                }
+            }
+        }
 
         @Override
         public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            out.collect(context.getCurrentKey());
+            rideStartState.clear();
+            endTimerState.clear();
+        }
+
+        private boolean rideLongerThanTwoHours(Long rideStart, Instant rideEnd) {
+            Instant start = Instant.ofEpochMilli(rideStart);
+            return rideEnd.isAfter(start.plus(2, ChronoUnit.HOURS));
+        }
     }
 }
