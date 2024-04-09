@@ -45,15 +45,19 @@ import java.util.Iterator;
  */
 public class HourlyTipsExercise {
 
+    private final boolean useProcessMethod;
     private final SourceFunction<TaxiFare> source;
     private final SinkFunction<Tuple3<Long, Long, Float>> sink;
 
     /** Creates a job using the source and sink provided. */
     public HourlyTipsExercise(
-            SourceFunction<TaxiFare> source, SinkFunction<Tuple3<Long, Long, Float>> sink) {
+            SourceFunction<TaxiFare> source,
+            SinkFunction<Tuple3<Long, Long, Float>> sink,
+            boolean useProcessMethod) {
 
         this.source = source;
         this.sink = sink;
+        this.useProcessMethod = useProcessMethod;
     }
 
     /**
@@ -64,7 +68,7 @@ public class HourlyTipsExercise {
     public static void main(String[] args) throws Exception {
 
         HourlyTipsExercise job =
-                new HourlyTipsExercise(new TaxiFareGenerator(), new PrintSinkFunction<>());
+                new HourlyTipsExercise(new TaxiFareGenerator(), new PrintSinkFunction<>(), false);
 
         job.execute();
     }
@@ -76,7 +80,42 @@ public class HourlyTipsExercise {
      * @throws Exception which occurs during job execution.
      */
     public JobExecutionResult execute() throws Exception {
+        if (useProcessMethod) {
+            return executeWithProcess();
+        } else {
+            return executeWithReduce();
+        }
+    }
 
+    private JobExecutionResult executeWithProcess() throws Exception {
+        // set up streaming execution environment
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // start the data generator
+        DataStream<TaxiFare> fares = env.addSource(source);
+
+        // replace this with your solution
+        DataStream<TaxiFare> watermarkedFares = fares.assignTimestampsAndWatermarks(
+                WatermarkStrategy
+                        .<TaxiFare>forMonotonousTimestamps()
+                        .withTimestampAssigner((taxiFare, oldTimeStamp) -> taxiFare.startTime.toEpochMilli())
+        );
+
+        DataStream<Tuple3<Long, Long, Float>> driversWithSummedTips = watermarkedFares.keyBy(fare -> fare.driverId)
+                .window(TumblingEventTimeWindows.of(Time.minutes(60)))
+                .process(new CollectTipsWindowFunction());
+
+        DataStream<Tuple3<Long, Long, Float>> driversWithMaximumTipsPerHour = driversWithSummedTips
+                .windowAll(TumblingEventTimeWindows.of(Time.minutes(60)))
+                .maxBy(2);
+
+        driversWithMaximumTipsPerHour.addSink(sink);
+
+        // execute the pipeline and return the result
+        return env.execute("Hourly Tips");
+    }
+
+    private JobExecutionResult executeWithReduce() throws Exception {
         // set up streaming execution environment
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
@@ -143,6 +182,21 @@ public class HourlyTipsExercise {
             long windowEndTimestamp = context.window().getEnd();
             Tuple3<Long, Long, Float> driverWithSummedTips = new Tuple3<>(windowEndTimestamp, driverId, tipSum);
             out.collect(driverWithSummedTips);
+        }
+    }
+
+    private static class CollectTipsWindowFunction extends ProcessWindowFunction<TaxiFare, Tuple3<Long, Long, Float>, Long, TimeWindow> {
+        @Override
+        public void process(Long key,
+                            Context context,
+                            Iterable<TaxiFare> fares,
+                            Collector<Tuple3<Long, Long, Float>> out) throws Exception {
+            float sum = 0.0f;
+            for (TaxiFare fare : fares) {
+                sum += fare.tip;
+            }
+            long windowEndTimestamp = context.window().getEnd();
+            out.collect(Tuple3.of(windowEndTimestamp, key, sum));
         }
     }
 }
