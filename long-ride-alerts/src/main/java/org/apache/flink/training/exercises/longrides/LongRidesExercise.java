@@ -21,6 +21,8 @@ package org.apache.flink.training.exercises.longrides;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -30,10 +32,12 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
+
+import static java.time.temporal.ChronoUnit.*;
 
 /**
  * The "Long Ride Alerts" exercise.
@@ -98,17 +102,72 @@ public class LongRidesExercise {
     @VisibleForTesting
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
 
+        private transient ValueState<TaxiRide> rideState;
+
         @Override
         public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+            rideState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("RideState", TaxiRide.class)
+            );
         }
 
         @Override
         public void processElement(TaxiRide ride, Context context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+
+            TaxiRide storedRide = rideState.value();
+
+            if (storedRide == null) {
+                if (ride.isStart) {
+                    // Timer will check for the corresponding end ride event after 2 hours
+                    context.timerService().registerEventTimeTimer(
+                            ride.eventTime.plus(2, HOURS).toEpochMilli()
+                    );
+                    // First ride start event, store it
+                    rideState.update(ride);
+                } else {
+                    // First ride end event, store it
+                    rideState.update(ride);
+                    // We allow for 1 minute out-of-order lateness, register timer to disallow later start events
+                    context.timerService().registerEventTimeTimer(
+                            ride.eventTime.plus(1, MINUTES).toEpochMilli()
+                    );
+                }
+            } else {
+                if (ride.isStart) {
+                    // Stored ride is the corresponding end ride event
+                    if (rideLongerThanTwoHours(ride, storedRide)) {
+                        out.collect(ride.rideId);
+                    }
+                } else {
+                    // Stored ride is the corresponding start ride event
+                    if (rideLongerThanTwoHours(storedRide, ride)) {
+                        out.collect(ride.rideId);
+                    }
+                    // Delete timer since we have already seen the ride end event before it triggered
+                    context.timerService().deleteEventTimeTimer(storedRide.eventTime.plus(2, HOURS).toEpochMilli());
+                }
+                rideState.clear();
+            }
+        }
 
         @Override
         public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            TaxiRide ride = rideState.value();
+            if (ride == null) { return; } // When ride start arrives out of order within 1 minute
+            if (ride.eventTime.plus(1, MINUTES).toEpochMilli() == timestamp) {
+                // Timer triggers when an end ride event is not followed by a start ride event within one minute
+                rideState.clear();
+            } else {
+                // Timer triggers when a start ride event is not followed by an end ride event within two hours
+                out.collect(ride.rideId);
+                rideState.clear();
+            }
+        }
+
+        private boolean rideLongerThanTwoHours(TaxiRide rideStart, TaxiRide rideEnd) {
+            return rideEnd.eventTime.isAfter(rideStart.eventTime.plus(2, HOURS));
+        }
     }
 }

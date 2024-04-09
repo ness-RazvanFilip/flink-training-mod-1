@@ -33,14 +33,33 @@ import org.apache.flink.training.solutions.hourlytips.HourlyTipsSolution;
 
 import org.junit.ClassRule;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.AssertionsForInterfaceTypes.assertThat;
+import static org.junit.runners.Parameterized.*;
 
+@RunWith(Parameterized.class)
 public class HourlyTipsTest {
+
+    private final boolean useProcessMethod;
+
+    public HourlyTipsTest(boolean useProcessMethod) {
+        this.useProcessMethod = useProcessMethod;
+    }
+
+    @Parameters
+    public static Collection<Object[]> data() {
+        return Arrays.asList(new Object[][] {
+                {false}, {true}
+        });
+    }
 
     private static final int PARALLELISM = 2;
 
@@ -118,7 +137,7 @@ public class HourlyTipsTest {
     private ComposedPipeline<TaxiFare, Tuple3<Long, Long, Float>> hourlyTipsPipeline() {
 
         ExecutablePipeline<TaxiFare, Tuple3<Long, Long, Float>> exercise =
-                (source, sink) -> new HourlyTipsExercise(source, sink).execute();
+                (source, sink) -> new HourlyTipsExercise(source, sink, useProcessMethod).execute();
 
         ExecutablePipeline<TaxiFare, Tuple3<Long, Long, Float>> solution =
                 (source, sink) -> new HourlyTipsSolution(source, sink).execute();
