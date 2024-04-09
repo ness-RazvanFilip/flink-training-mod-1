@@ -33,6 +33,7 @@ import org.junit.Test;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import static java.time.temporal.ChronoUnit.*;
 import static org.assertj.core.api.AssertionsForInterfaceTypes.assertThat;
 
 // needed for the Scala tests to use scala.Long with this Java test
@@ -162,6 +163,49 @@ public class LongRidesUnitTest extends LongRidesTestBase {
         StreamRecord<Long> rideIdAtTimeOfWatermark =
                 new StreamRecord<>(startOfLongRide.rideId, mark2HoursLater.getTimestamp());
         assertThat(harness.getOutput()).containsExactly(rideIdAtTimeOfWatermark, mark2HoursLater);
+    }
+
+    @Test
+    public void shouldClearStateOnMissingStartEvent() throws Exception {
+        TaxiRide rideStarted = startRide(1, BEGINNING);
+        TaxiRide rideEnded = endRide(rideStarted, ONE_MINUTE_LATER);
+
+        harness.processElement(rideEnded.asStreamRecord());
+
+        assertThat(harness.numKeyedStateEntries()).isOne();
+
+        Watermark markOneMoreMinuteLater = new Watermark(ONE_MINUTE_LATER.plus(1, MINUTES).toEpochMilli());
+        harness.processWatermark(markOneMoreMinuteLater);
+
+        assertThat(harness.numKeyedStateEntries()).isZero();
+    }
+
+    @Test
+    public void shouldClearStateOnLateArrivingEndEvent() throws Exception {
+
+        TaxiRide startOfLongRide = startRide(1, BEGINNING);
+        TaxiRide endOfLongRide = endRide(startOfLongRide, THREE_HOURS_LATER);
+        harness.processElement(startOfLongRide.asStreamRecord());
+
+        // Can't be done properly without some managed keyed state
+        assertThat(harness.numKeyedStateEntries()).isGreaterThan(0);
+
+        // At this point there should be no output
+        ConcurrentLinkedQueue<Object> initialOutput = harness.getOutput();
+        assertThat(initialOutput).isEmpty();
+
+        Watermark mark2HoursLater =
+                new Watermark(BEGINNING.plusSeconds(2 * 60 * 60).toEpochMilli());
+        harness.processWatermark(mark2HoursLater);
+
+        harness.processElement(endOfLongRide.asStreamRecord());
+        // End event will still store state for one minute if start event is missing
+        assertThat(harness.numKeyedStateEntries()).isOne();
+        Watermark mark2Hours1MinuteLater =
+                new Watermark(THREE_HOURS_LATER.plus(1, MINUTES).toEpochMilli());
+        harness.processWatermark(mark2Hours1MinuteLater);
+        // After one minute, end event state should be cleared if start event is missing
+        assertThat(harness.numKeyedStateEntries()).isZero();
     }
 
     private Long resultingRideId() {

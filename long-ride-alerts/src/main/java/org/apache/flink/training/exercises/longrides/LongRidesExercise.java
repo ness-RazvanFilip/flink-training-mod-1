@@ -35,6 +35,7 @@ import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 
 import static java.time.temporal.ChronoUnit.*;
 
@@ -122,9 +123,16 @@ public class LongRidesExercise {
                     context.timerService().registerEventTimeTimer(
                             ride.eventTime.plus(2, HOURS).toEpochMilli()
                     );
+                    // First ride start event, store it
+                    rideState.update(ride);
+                } else {
+                    // First ride end event, store it
+                    rideState.update(ride);
+                    // We allow for 1 minute out-of-order lateness, register timer to disallow later start events
+                    context.timerService().registerEventTimeTimer(
+                            ride.eventTime.plus(1, MINUTES).toEpochMilli()
+                    );
                 }
-                // First start or end event, store it
-                rideState.update(ride);
             } else {
                 if (ride.isStart) {
                     // Stored ride is the corresponding end ride event
@@ -146,9 +154,16 @@ public class LongRidesExercise {
         @Override
         public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
                 throws Exception {
-            // Timer triggers when a start ride event is not followed by an end ride event within two hours
-            out.collect(rideState.value().rideId);
-            rideState.clear();
+            TaxiRide ride = rideState.value();
+            if (ride == null) { return; } // When ride start arrives out of order within 1 minute
+            if (ride.eventTime.plus(1, MINUTES).toEpochMilli() == timestamp) {
+                // Timer triggers when an end ride event is not followed by a start ride event within one minute
+                rideState.clear();
+            } else {
+                // Timer triggers when a start ride event is not followed by an end ride event within two hours
+                out.collect(ride.rideId);
+                rideState.clear();
+            }
         }
 
         private boolean rideLongerThanTwoHours(TaxiRide rideStart, TaxiRide rideEnd) {
